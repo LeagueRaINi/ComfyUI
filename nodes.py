@@ -1848,6 +1848,34 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 EXTENSION_WEB_DIRS = {}
 
+def zluda_cudnn_patch(module_name):
+    return f"""import torch
+from types import ModuleType
+
+class CustomCudnnModule(ModuleType):
+    def __init__(self, original_module):
+        super().__init__(original_module.__name__)
+        self.__dict__.update(original_module.__dict__)
+
+    @property
+    def enabled(self):
+        return False
+
+    @enabled.setter
+    def enabled(self, value):
+        # Prevent extensions from enabling cuDNN
+        if value:
+            print("\033[93m[ZLUDA] Blocked attempt to enable cuDNN from custom node: {module_name}.\033[0m")
+
+try:
+    if "[ZLUDA]" in torch.cuda.get_device_name(torch.cuda.current_device()):
+        print("\033[92mPatched torch.backends.cudnn in custom node {module_name} to prevent enabling cuDNN.\033[0m")
+        original_cudnn = torch.backends.cudnn
+        custom_cudnn = CustomCudnnModule(original_cudnn)
+        torch.backends.cudnn = custom_cudnn
+except:
+    pass"""
+
 def load_custom_node(module_path, ignore=set()):
     module_name = os.path.basename(module_path)
     if os.path.isfile(module_path):
@@ -1865,6 +1893,10 @@ def load_custom_node(module_path, ignore=set()):
         module = importlib.util.module_from_spec(module_spec)
         sys.modules[module_name] = module
         module_spec.loader.exec_module(module)
+
+        # we inject this patch into every module to prevent them from possibly re'enabling cuDNN,
+        # its dirty, it sucks but it works
+        exec(zluda_cudnn_patch(module_name), module.__dict__)
 
         if hasattr(module, "WEB_DIRECTORY") and getattr(module, "WEB_DIRECTORY") is not None:
             web_dir = os.path.abspath(os.path.join(module_dir, getattr(module, "WEB_DIRECTORY")))
