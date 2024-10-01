@@ -88,8 +88,12 @@ class LowVramPatch:
         self.key = key
         self.patches = patches
     def __call__(self, weight):
-        return comfy.lora.calculate_weight(self.patches[self.key], weight, self.key, intermediate_dtype=weight.dtype)
+        intermediate_dtype = weight.dtype
+        if intermediate_dtype not in [torch.float32, torch.float16, torch.bfloat16]: #intermediate_dtype has to be one that is supported in math ops
+            intermediate_dtype = torch.float32
+            return comfy.float.stochastic_rounding(comfy.lora.calculate_weight(self.patches[self.key], weight.to(intermediate_dtype), self.key, intermediate_dtype=intermediate_dtype), weight.dtype, seed=string_to_seed(self.key))
 
+        return comfy.lora.calculate_weight(self.patches[self.key], weight, self.key, intermediate_dtype=intermediate_dtype)
 class ModelPatcher:
     def __init__(self, model, load_device, offload_device, size=0, weight_inplace_update=False):
         self.size = size
@@ -283,17 +287,21 @@ class ModelPatcher:
         return list(p)
 
     def get_key_patches(self, filter_prefix=None):
-        comfy.model_management.unload_model_clones(self)
         model_sd = self.model_state_dict()
         p = {}
         for k in model_sd:
             if filter_prefix is not None:
                 if not k.startswith(filter_prefix):
                     continue
-            if k in self.patches:
-                p[k] = [model_sd[k]] + self.patches[k]
+            bk = self.backup.get(k, None)
+            if bk is not None:
+                weight = bk.weight
             else:
-                p[k] = (model_sd[k],)
+                weight = model_sd[k]
+            if k in self.patches:
+                p[k] = [weight] + self.patches[k]
+            else:
+                p[k] = (weight,)
         return p
 
     def model_state_dict(self, filter_prefix=None):

@@ -16,14 +16,15 @@ class EmptyLatentAudio:
 
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": {"seconds": ("FLOAT", {"default": 47.6, "min": 1.0, "max": 1000.0, "step": 0.1})}}
+        return {"required": {"seconds": ("FLOAT", {"default": 47.6, "min": 1.0, "max": 1000.0, "step": 0.1}),
+                             "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096, "tooltip": "The number of latent images in the batch."}),
+                             }}
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "generate"
 
     CATEGORY = "latent/audio"
 
-    def generate(self, seconds):
-        batch_size = 1
+    def generate(self, seconds, batch_size):
         length = round((seconds * 44100 / 2048) / 2) * 2
         latent = torch.zeros([batch_size, 64, length], device=self.device)
         return ({"samples":latent, "type": "audio"}, )
@@ -58,6 +59,9 @@ class VAEDecodeAudio:
 
     def decode(self, vae, samples):
         audio = vae.decode(samples["samples"]).movedim(-1, 1)
+        std = torch.std(audio, dim=[1,2], keepdim=True) * 5.0
+        std[std < 1.0] = 1.0
+        audio /= std
         return ({"waveform": audio, "sample_rate": 44100}, )
 
 
