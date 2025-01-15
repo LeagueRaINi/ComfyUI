@@ -1,7 +1,7 @@
-import folder_paths
 import comfy.sd
 import comfy.model_sampling
 import comfy.latent_formats
+import nodes
 import torch
 
 class LCM(comfy.model_sampling.EPS):
@@ -25,8 +25,8 @@ class X0(comfy.model_sampling.EPS):
 class ModelSamplingDiscreteDistilled(comfy.model_sampling.ModelSamplingDiscrete):
     original_timesteps = 50
 
-    def __init__(self, model_config=None):
-        super().__init__(model_config)
+    def __init__(self, model_config=None, zsnr=None):
+        super().__init__(model_config, zsnr=zsnr)
 
         self.skip_steps = self.num_timesteps // self.original_timesteps
 
@@ -49,25 +49,6 @@ class ModelSamplingDiscreteDistilled(comfy.model_sampling.ModelSamplingDiscrete)
         log_sigma = (1 - w) * self.log_sigmas[low_idx] + w * self.log_sigmas[high_idx]
         return log_sigma.exp().to(timestep.device)
 
-
-def rescale_zero_terminal_snr_sigmas(sigmas):
-    alphas_cumprod = 1 / ((sigmas * sigmas) + 1)
-    alphas_bar_sqrt = alphas_cumprod.sqrt()
-
-    # Store old values.
-    alphas_bar_sqrt_0 = alphas_bar_sqrt[0].clone()
-    alphas_bar_sqrt_T = alphas_bar_sqrt[-1].clone()
-
-    # Shift so the last timestep is zero.
-    alphas_bar_sqrt -= (alphas_bar_sqrt_T)
-
-    # Scale so the first timestep is back to the old value.
-    alphas_bar_sqrt *= alphas_bar_sqrt_0 / (alphas_bar_sqrt_0 - alphas_bar_sqrt_T)
-
-    # Convert alphas_bar_sqrt to betas
-    alphas_bar = alphas_bar_sqrt**2  # Revert sqrt
-    alphas_bar[-1] = 4.8973451890853435e-08
-    return ((1 - alphas_bar) / alphas_bar) ** 0.5
 
 class ModelSamplingDiscrete:
     @classmethod
@@ -99,9 +80,7 @@ class ModelSamplingDiscrete:
         class ModelSamplingAdvanced(sampling_base, sampling_type):
             pass
 
-        model_sampling = ModelSamplingAdvanced(model.model.model_config)
-        if zsnr:
-            model_sampling.set_sigmas(rescale_zero_terminal_snr_sigmas(model_sampling.sigmas))
+        model_sampling = ModelSamplingAdvanced(model.model.model_config, zsnr=zsnr)
 
         m.add_object_patch("model_sampling", model_sampling)
         return (m, )
@@ -174,7 +153,10 @@ class ModelSamplingFlux:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
-                              "shift": ("FLOAT", {"default": 1.15, "min": 0.0, "max": 100.0, "step":0.01}),
+                              "max_shift": ("FLOAT", {"default": 1.15, "min": 0.0, "max": 100.0, "step":0.01}),
+                              "base_shift": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 100.0, "step":0.01}),
+                              "width": ("INT", {"default": 1024, "min": 16, "max": nodes.MAX_RESOLUTION, "step": 8}),
+                              "height": ("INT", {"default": 1024, "min": 16, "max": nodes.MAX_RESOLUTION, "step": 8}),
                               }}
 
     RETURN_TYPES = ("MODEL",)
@@ -182,8 +164,14 @@ class ModelSamplingFlux:
 
     CATEGORY = "advanced/model"
 
-    def patch(self, model, shift):
+    def patch(self, model, max_shift, base_shift, width, height):
         m = model.clone()
+
+        x1 = 256
+        x2 = 4096
+        mm = (max_shift - base_shift) / (x2 - x1)
+        b = base_shift - mm * x1
+        shift = (width * height / (8 * 8 * 2 * 2)) * mm + b
 
         sampling_base = comfy.model_sampling.ModelSamplingFlux
         sampling_type = comfy.model_sampling.CONST
@@ -201,7 +189,7 @@ class ModelSamplingContinuousEDM:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
-                              "sampling": (["v_prediction", "edm_playground_v2.5", "eps"],),
+                              "sampling": (["v_prediction", "edm", "edm_playground_v2.5", "eps"],),
                               "sigma_max": ("FLOAT", {"default": 120.0, "min": 0.0, "max": 1000.0, "step":0.001, "round": False}),
                               "sigma_min": ("FLOAT", {"default": 0.002, "min": 0.0, "max": 1000.0, "step":0.001, "round": False}),
                               }}
@@ -218,6 +206,9 @@ class ModelSamplingContinuousEDM:
         sigma_data = 1.0
         if sampling == "eps":
             sampling_type = comfy.model_sampling.EPS
+        elif sampling == "edm":
+            sampling_type = comfy.model_sampling.EDM
+            sigma_data = 0.5
         elif sampling == "v_prediction":
             sampling_type = comfy.model_sampling.V_PREDICTION
         elif sampling == "edm_playground_v2.5":
@@ -252,7 +243,6 @@ class ModelSamplingContinuousV:
     def patch(self, model, sampling, sigma_max, sigma_min):
         m = model.clone()
 
-        latent_format = None
         sigma_data = 1.0
         if sampling == "v_prediction":
             sampling_type = comfy.model_sampling.V_PREDICTION

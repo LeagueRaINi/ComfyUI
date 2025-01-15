@@ -7,19 +7,19 @@ on:
         description: 'cuda version'
         required: true
         type: string
-        default: "124"
+        default: "126"
 
       python_minor:
         description: 'python minor version'
         required: true
         type: string
-        default: "12"
+        default: "13"
 
       python_patch:
         description: 'python patch version'
         required: true
         type: string
-        default: "4"
+        default: "1"
 #  push:
 #    branches:
 #      - master
@@ -55,7 +55,7 @@ jobs:
             sed -i '1i../ComfyUI' ./python3${{ inputs.python_minor }}._pth
             cd ..
 
-            git clone https://github.com/comfyanonymous/taesd
+            git clone --depth 1 https://github.com/comfyanonymous/taesd
             cp taesd/*.pth ./ComfyUI_copy/models/vae_approx/
 
             mkdir ComfyUI_windows_portable_nightly_pytorch
@@ -67,6 +67,7 @@ jobs:
             mkdir update
             cp -r ComfyUI/.ci/update_windows/* ./update/
             cp -r ComfyUI/.ci/windows_base_files/* ./
+            cp -r ComfyUI/.ci/windows_nightly_base_files/* ./
 
             echo "call update_comfyui.bat nopause
             ..\python_embeded\python.exe -s -m pip install --upgrade --pre torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/nightly/cu${{ inputs.cu }} -r ../ComfyUI/requirements.txt pygit2

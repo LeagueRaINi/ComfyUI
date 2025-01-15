@@ -12,7 +12,8 @@ import json
 import glob
 import struct
 import ssl
-import hashlib
+import socket
+import ipaddress
 from PIL import Image, ImageOps
 from PIL.PngImagePlugin import PngInfo
 from io import BytesIO
@@ -26,9 +27,13 @@ from comfy.cli_args import args
 import comfy.utils
 import comfy.model_management
 import node_helpers
+from comfyui_version import __version__
 from app.frontend_management import FrontendManager
 from app.user_manager import UserManager
-
+from app.model_manager import ModelFileManager
+from app.custom_node_manager import CustomNodeManager
+from typing import Optional
+from api_server.routes.internal.internal_routes import InternalRoutes
 
 class BinaryEventTypes:
     PREVIEW_IMAGE = 1
@@ -37,7 +42,7 @@ class BinaryEventTypes:
 async def send_socket_catch_exception(function, message):
     try:
         await function(message)
-    except (aiohttp.ClientError, aiohttp.ClientPayloadError, ConnectionResetError) as err:
+    except (aiohttp.ClientError, aiohttp.ClientPayloadError, ConnectionResetError, BrokenPipeError, ConnectionError) as err:
         logging.warning("send error: {}".format(err))
 
 @web.middleware
@@ -64,6 +69,68 @@ def create_cors_middleware(allowed_origin: str):
 
     return cors_middleware
 
+def is_loopback(host):
+    if host is None:
+        return False
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return True
+        else:
+            return False
+    except:
+        pass
+
+    loopback = False
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            r = socket.getaddrinfo(host, None, family, socket.SOCK_STREAM)
+            for family, _, _, _, sockaddr in r:
+                if not ipaddress.ip_address(sockaddr[0]).is_loopback:
+                    return loopback
+                else:
+                    loopback = True
+        except socket.gaierror:
+            pass
+
+    return loopback
+
+
+def create_origin_only_middleware():
+    @web.middleware
+    async def origin_only_middleware(request: web.Request, handler):
+        #this code is used to prevent the case where a random website can queue comfy workflows by making a POST to 127.0.0.1 which browsers don't prevent for some dumb reason.
+        #in that case the Host and Origin hostnames won't match
+        #I know the proper fix would be to add a cookie but this should take care of the problem in the meantime
+        if 'Host' in request.headers and 'Origin' in request.headers:
+            host = request.headers['Host']
+            origin = request.headers['Origin']
+            host_domain = host.lower()
+            parsed = urllib.parse.urlparse(origin)
+            origin_domain = parsed.netloc.lower()
+            host_domain_parsed = urllib.parse.urlsplit('//' + host_domain)
+
+            #limit the check to when the host domain is localhost, this makes it slightly less safe but should still prevent the exploit
+            loopback = is_loopback(host_domain_parsed.hostname)
+
+            if parsed.port is None: #if origin doesn't have a port strip it from the host to handle weird browsers, same for host
+                host_domain = host_domain_parsed.hostname
+            if host_domain_parsed.port is None:
+                origin_domain = parsed.hostname
+
+            if loopback and host_domain is not None and origin_domain is not None and len(host_domain) > 0 and len(origin_domain) > 0:
+                if host_domain != origin_domain:
+                    logging.warning("WARNING: request with non matching host and origin {} != {}, returning 403".format(host_domain, origin_domain))
+                    return web.Response(status=403)
+
+        if request.method == "OPTIONS":
+            response = web.Response()
+        else:
+            response = await handler(request)
+
+        return response
+
+    return origin_only_middleware
+
 class PromptServer():
     def __init__(self, loop):
         PromptServer.instance = self
@@ -72,15 +139,21 @@ class PromptServer():
         mimetypes.types_map['.js'] = 'application/javascript; charset=utf-8'
 
         self.user_manager = UserManager()
+        self.model_file_manager = ModelFileManager()
+        self.custom_node_manager = CustomNodeManager()
+        self.internal_routes = InternalRoutes(self)
         self.supports = ["custom_nodes_from_web"]
         self.prompt_queue = None
         self.loop = loop
         self.messages = asyncio.Queue()
+        self.client_session:Optional[aiohttp.ClientSession] = None
         self.number = 0
 
         middlewares = [cache_control]
         if args.enable_cors_header:
             middlewares.append(create_cors_middleware(args.enable_cors_header))
+        else:
+            middlewares.append(create_origin_only_middleware())
 
         max_upload_size = round(args.max_upload_size * 1024 * 1024)
         self.app = web.Application(client_max_size=max_upload_size, middlewares=middlewares)
@@ -127,12 +200,30 @@ class PromptServer():
 
         @routes.get("/")
         async def get_root(request):
-            return web.FileResponse(os.path.join(self.web_root, "index.html"))
+            response = web.FileResponse(os.path.join(self.web_root, "index.html"))
+            response.headers['Cache-Control'] = 'no-cache'
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+            return response
 
         @routes.get("/embeddings")
         def get_embeddings(self):
             embeddings = folder_paths.get_filename_list("embeddings")
             return web.json_response(list(map(lambda a: os.path.splitext(a)[0], embeddings)))
+
+        @routes.get("/models")
+        def list_model_types(request):
+            model_types = list(folder_paths.folder_names_and_paths.keys())
+
+            return web.json_response(model_types)
+
+        @routes.get("/models/{folder}")
+        async def get_models(request):
+            folder = request.match_info.get("folder", None)
+            if not folder in folder_paths.folder_names_and_paths:
+                return web.Response(status=404)
+            files = folder_paths.get_filename_list(folder)
+            return web.json_response(files)
 
         @routes.get("/extensions")
         async def get_extensions(request):
@@ -163,7 +254,7 @@ class PromptServer():
 
         def compare_image_hash(filepath, image):
             hasher = node_helpers.hasher()
-            
+
             # function to compare hashes of two images to see if it already exists, fix to #3465
             if os.path.exists(filepath):
                 a = hasher()
@@ -357,7 +448,21 @@ class PromptServer():
                             return web.Response(body=alpha_buffer.read(), content_type='image/png',
                                                 headers={"Content-Disposition": f"filename=\"{filename}\""})
                     else:
-                        return web.FileResponse(file, headers={"Content-Disposition": f"filename=\"{filename}\""})
+                        # Get content type from mimetype, defaulting to 'application/octet-stream'
+                        content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+
+                        # For security, force certain extensions to download instead of display
+                        file_extension = os.path.splitext(filename)[1].lower()
+                        if file_extension in {'.html', '.htm', '.js', '.css'}:
+                            content_type = 'application/octet-stream'  # Forces download
+
+                        return web.FileResponse(
+                            file,
+                            headers={
+                                "Content-Disposition": f"filename=\"{filename}\"",
+                                "Content-Type": content_type
+                            }
+                        )
 
             return web.Response(status=404)
 
@@ -385,16 +490,25 @@ class PromptServer():
             return web.json_response(dt["__metadata__"])
 
         @routes.get("/system_stats")
-        async def get_queue(request):
+        async def system_stats(request):
             device = comfy.model_management.get_torch_device()
             device_name = comfy.model_management.get_torch_device_name(device)
+            cpu_device = comfy.model_management.torch.device("cpu")
+            ram_total = comfy.model_management.get_total_memory(cpu_device)
+            ram_free = comfy.model_management.get_free_memory(cpu_device)
             vram_total, torch_vram_total = comfy.model_management.get_total_memory(device, torch_total_too=True)
             vram_free, torch_vram_free = comfy.model_management.get_free_memory(device, torch_free_too=True)
+
             system_stats = {
                 "system": {
                     "os": os.name,
+                    "ram_total": ram_total,
+                    "ram_free": ram_free,
+                    "comfyui_version": __version__,
                     "python_version": sys.version,
-                    "embedded_python": os.path.split(os.path.split(sys.executable)[0])[1] == "python_embeded"
+                    "pytorch_version": comfy.model_management.torch_version,
+                    "embedded_python": os.path.split(os.path.split(sys.executable)[0])[1] == "python_embeded",
+                    "argv": sys.argv
                 },
                 "devices": [
                     {
@@ -418,6 +532,7 @@ class PromptServer():
             obj_class = nodes.NODE_CLASS_MAPPINGS[node_class]
             info = {}
             info['input'] = obj_class.INPUT_TYPES()
+            info['input_order'] = {key: list(value.keys()) for (key, value) in obj_class.INPUT_TYPES().items()}
             info['output'] = obj_class.RETURN_TYPES
             info['output_is_list'] = obj_class.OUTPUT_IS_LIST if hasattr(obj_class, 'OUTPUT_IS_LIST') else [False] * len(obj_class.RETURN_TYPES)
             info['output_name'] = obj_class.RETURN_NAMES if hasattr(obj_class, 'RETURN_NAMES') else info['output']
@@ -433,18 +548,27 @@ class PromptServer():
 
             if hasattr(obj_class, 'CATEGORY'):
                 info['category'] = obj_class.CATEGORY
+
+            if hasattr(obj_class, 'OUTPUT_TOOLTIPS'):
+                info['output_tooltips'] = obj_class.OUTPUT_TOOLTIPS
+
+            if getattr(obj_class, "DEPRECATED", False):
+                info['deprecated'] = True
+            if getattr(obj_class, "EXPERIMENTAL", False):
+                info['experimental'] = True
             return info
 
         @routes.get("/object_info")
         async def get_object_info(request):
-            out = {}
-            for x in nodes.NODE_CLASS_MAPPINGS:
-                try:
-                    out[x] = node_info(x)
-                except Exception as e:
-                    logging.error(f"[ERROR] An error occurred while retrieving information for the '{x}' node.")
-                    logging.error(traceback.format_exc())
-            return web.json_response(out)
+            with folder_paths.cache_helper:
+                out = {}
+                for x in nodes.NODE_CLASS_MAPPINGS:
+                    try:
+                        out[x] = node_info(x)
+                    except Exception:
+                        logging.error(f"[ERROR] An error occurred while retrieving information for the '{x}' node.")
+                        logging.error(traceback.format_exc())
+                return web.json_response(out)
 
         @routes.get("/object_info/{node_class}")
         async def get_object_info_node(request):
@@ -462,7 +586,7 @@ class PromptServer():
             return web.json_response(self.prompt_queue.get_history(max_items=max_items))
 
         @routes.get("/history/{prompt_id}")
-        async def get_history(request):
+        async def get_history_prompt_id(request):
             prompt_id = request.match_info.get("prompt_id", None)
             return web.json_response(self.prompt_queue.get_history(prompt_id=prompt_id))
 
@@ -477,8 +601,6 @@ class PromptServer():
         @routes.post("/prompt")
         async def post_prompt(request):
             logging.info("got prompt")
-            resp_code = 200
-            out_string = ""
             json_data =  await request.json()
             json_data = self.trigger_on_prompt(json_data)
 
@@ -556,8 +678,15 @@ class PromptServer():
 
             return web.Response(status=200)
 
+    async def setup(self):
+        timeout = aiohttp.ClientTimeout(total=None) # no timeout
+        self.client_session = aiohttp.ClientSession(timeout=timeout)
+
     def add_routes(self):
         self.user_manager.add_routes(self.routes)
+        self.model_file_manager.add_routes(self.routes)
+        self.custom_node_manager.add_routes(self.routes, self.app, nodes.LOADED_MODULE_DIRS.items())
+        self.app.add_subapp('/internal', self.internal_routes.get_app())
 
         # Prefix every route with /api for easier matching for delegation.
         # This is very useful for frontend dev server, which need to forward
@@ -573,10 +702,9 @@ class PromptServer():
         self.app.add_routes(api_routes)
         self.app.add_routes(self.routes)
 
+        # Add routes from web extensions.
         for name, dir in nodes.EXTENSION_WEB_DIRS.items():
-            self.app.add_routes([
-                web.static('/extensions/' + urllib.parse.quote(name), dir),
-            ])
+            self.app.add_routes([web.static('/extensions/' + name, dir)])
 
         self.app.add_routes([
             web.static('/', self.web_root),
@@ -663,6 +791,9 @@ class PromptServer():
             await self.send(*msg)
 
     async def start(self, address, port, verbose=True, call_on_start=None):
+        await self.start_multi_address([(address, port)], call_on_start=call_on_start)
+
+    async def start_multi_address(self, addresses, call_on_start=None, verbose=True):
         runner = web.AppRunner(self.app, access_log=None)
         await runner.setup()
         ssl_ctx = None
@@ -673,14 +804,28 @@ class PromptServer():
                                 keyfile=args.tls_keyfile)
                 scheme = "https"
 
-        site = web.TCPSite(runner, address, port, ssl_context=ssl_ctx)
-        await site.start()
-
         if verbose:
             logging.info("Starting server\n")
-            logging.info("To see the GUI go to: {}://{}:{}".format(scheme, address, port))
+        for addr in addresses:
+            address = addr[0]
+            port = addr[1]
+            site = web.TCPSite(runner, address, port, ssl_context=ssl_ctx)
+            await site.start()
+
+            if not hasattr(self, 'address'):
+                self.address = address #TODO: remove this
+                self.port = port
+
+            if ':' in address:
+                address_print = "[{}]".format(address)
+            else:
+                address_print = address
+
+            if verbose:
+                logging.info("To see the GUI go to: {}://{}:{}".format(scheme, address_print, port))
+
         if call_on_start is not None:
-            call_on_start(scheme, address, port)
+            call_on_start(scheme, self.address, self.port)
 
     def add_on_prompt_handler(self, handler):
         self.on_prompt_handlers.append(handler)
@@ -689,8 +834,8 @@ class PromptServer():
         for handler in self.on_prompt_handlers:
             try:
                 json_data = handler(json_data)
-            except Exception as e:
-                logging.warning(f"[ERROR] An error occurred during the on_prompt_handler processing")
+            except Exception:
+                logging.warning("[ERROR] An error occurred during the on_prompt_handler processing")
                 logging.warning(traceback.format_exc())
 
         return json_data

@@ -1,3 +1,21 @@
+"""
+    This file is part of ComfyUI.
+    Copyright (C) 2024 Comfy
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
 import torch
 from . import model_base
 from . import utils
@@ -30,6 +48,9 @@ class BASE:
     memory_usage_factor = 2.0
 
     manual_cast_dtype = None
+    custom_operations = None
+    scaled_fp8 = None
+    optimizations = {"fp8": False}
 
     @classmethod
     def matches(s, unet_config, state_dict=None):
@@ -52,6 +73,7 @@ class BASE:
         self.unet_config = unet_config.copy()
         self.sampling_settings = self.sampling_settings.copy()
         self.latent_format = self.latent_format()
+        self.optimizations = self.optimizations.copy()
         for x in self.unet_extra_config:
             self.unet_config[x] = self.unet_extra_config[x]
 
