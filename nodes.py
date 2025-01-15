@@ -2067,9 +2067,9 @@ LOADED_MODULE_DIRS = {}
 # Dictionary of successfully loaded module names and associated directories.
 LOADED_MODULE_DIRS = {}
 
-
 def zluda_cudnn_patch(module_name):
     return f"""import torch
+    import logging
 from types import ModuleType
 
 class CustomCudnnModule(ModuleType):
@@ -2085,39 +2085,11 @@ class CustomCudnnModule(ModuleType):
     def enabled(self, value):
         # Prevent extensions from enabling cuDNN
         if value:
-            print("\033[93m[ZLUDA] Blocked attempt to enable cuDNN from custom node: {module_name}.\033[0m")
+            logging.info("[ZLUDA] Blocked attempt to enable cuDNN from custom node: {}.".format(module_name))
 
 try:
     if "[ZLUDA]" in torch.cuda.get_device_name(torch.cuda.current_device()):
-        print("\033[92mPatched torch.backends.cudnn in custom node {module_name} to prevent enabling cuDNN.\033[0m")
-        original_cudnn = torch.backends.cudnn
-        custom_cudnn = CustomCudnnModule(original_cudnn)
-        torch.backends.cudnn = custom_cudnn
-except:
-    pass"""
-
-def zluda_cudnn_patch(module_name):
-    return f"""import torch
-from types import ModuleType
-
-class CustomCudnnModule(ModuleType):
-    def __init__(self, original_module):
-        super().__init__(original_module.__name__)
-        self.__dict__.update(original_module.__dict__)
-
-    @property
-    def enabled(self):
-        return False
-
-    @enabled.setter
-    def enabled(self, value):
-        # Prevent extensions from enabling cuDNN
-        if value:
-            print("\033[93m[ZLUDA] Blocked attempt to enable cuDNN from custom node: {module_name}.\033[0m")
-
-try:
-    if "[ZLUDA]" in torch.cuda.get_device_name(torch.cuda.current_device()):
-        print("\033[92mPatched torch.backends.cudnn in custom node {module_name} to prevent enabling cuDNN.\033[0m")
+        logging.info("[ZLUDA] Patched torch.backends.cudnn in custom node {} to prevent enabling cuDNN.".format(module_name))
         original_cudnn = torch.backends.cudnn
         custom_cudnn = CustomCudnnModule(original_cudnn)
         torch.backends.cudnn = custom_cudnn
