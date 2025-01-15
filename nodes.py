@@ -2069,7 +2069,6 @@ LOADED_MODULE_DIRS = {}
 
 def zluda_cudnn_patch(module_name):
     return f"""import torch
-    import logging
 from types import ModuleType
 
 class CustomCudnnModule(ModuleType):
@@ -2085,11 +2084,11 @@ class CustomCudnnModule(ModuleType):
     def enabled(self, value):
         # Prevent extensions from enabling cuDNN
         if value:
-            logging.info("[ZLUDA] Blocked attempt to enable cuDNN from custom node: {}.".format(module_name))
+            print("[ZLUDA] Blocked attempt to enable cuDNN from custom node: {module_name}.")
 
 try:
     if "[ZLUDA]" in torch.cuda.get_device_name(torch.cuda.current_device()):
-        logging.info("[ZLUDA] Patched torch.backends.cudnn in custom node {} to prevent enabling cuDNN.".format(module_name))
+        print("[ZLUDA] Patched torch.backends.cudnn in custom node {module_name} to prevent enabling cuDNN.")
         original_cudnn = torch.backends.cudnn
         custom_cudnn = CustomCudnnModule(original_cudnn)
         torch.backends.cudnn = custom_cudnn
