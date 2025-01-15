@@ -304,11 +304,11 @@ try:
     torch_device_name = get_torch_device_name(get_torch_device())
 
     if "[ZLUDA]" in torch_device_name:
-        logging.info("Detected ZLUDA, support for it is experimental and comfy may not work properly.")
+        logging.info("\033[36mDetected ZLUDA, support for it is experimental and comfy may not work properly.\033[0m")
 
         if torch.backends.cudnn.enabled:
             torch.backends.cudnn.enabled = False
-            logging.info("Disabling cuDNN because ZLUDA does currently not support it.")
+            logging.info("\033[36mDisabling cuDNN because ZLUDA does currently not support it.\033[0m")
 
         torch.backends.cuda.enable_flash_sdp(False)
         torch.backends.cuda.enable_math_sdp(True)
