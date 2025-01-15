@@ -256,17 +256,17 @@ try:
     torch_device_name = get_torch_device_name(get_torch_device())
 
     if "[ZLUDA]" in torch_device_name:
-        print("Detected ZLUDA, support for it is experimental and comfy may not work properly.")
+        logging.info("Detected ZLUDA, support for it is experimental and comfy may not work properly.")
 
         if torch.backends.cudnn.enabled:
             torch.backends.cudnn.enabled = False
-            print("Disabling cuDNN because ZLUDA does currently not support it.")
+            logging.info("Disabling cuDNN because ZLUDA does currently not support it.")
 
         torch.backends.cuda.enable_flash_sdp(False)
         torch.backends.cuda.enable_math_sdp(True)
         torch.backends.cuda.enable_mem_efficient_sdp(False)
 
-    print("Device:", torch_device_name)
+    logging.info("Device: {}.".format(torch_device_name))
 except:
     logging.warning("Could not pick default device.")
 
