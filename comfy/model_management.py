@@ -738,6 +738,8 @@ def unet_dtype(device=None, model_params=0, supported_dtypes=[torch.float16, tor
         return torch.float8_e4m3fn
     if args.fp8_e5m2_unet:
         return torch.float8_e5m2
+    if args.fp8_e8m0fnu_unet:
+        return torch.float8_e8m0fnu
 
     fp8_dtype = None
     if weight_dtype in FLOAT8_TYPES:
@@ -950,15 +952,61 @@ def force_channels_last():
     #TODO
     return False
 
-def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False):
+
+STREAMS = {}
+NUM_STREAMS = 1
+if args.async_offload:
+    NUM_STREAMS = 2
+    logging.info("Using async weight offloading with {} streams".format(NUM_STREAMS))
+
+stream_counters = {}
+def get_offload_stream(device):
+    stream_counter = stream_counters.get(device, 0)
+    if NUM_STREAMS <= 1:
+        return None
+
+    if device in STREAMS:
+        ss = STREAMS[device]
+        s = ss[stream_counter]
+        stream_counter = (stream_counter + 1) % len(ss)
+        if is_device_cuda(device):
+            ss[stream_counter].wait_stream(torch.cuda.current_stream())
+        stream_counters[device] = stream_counter
+        return s
+    elif is_device_cuda(device):
+        ss = []
+        for k in range(NUM_STREAMS):
+            ss.append(torch.cuda.Stream(device=device, priority=0))
+        STREAMS[device] = ss
+        s = ss[stream_counter]
+        stream_counter = (stream_counter + 1) % len(ss)
+        stream_counters[device] = stream_counter
+        return s
+    return None
+
+def sync_stream(device, stream):
+    if stream is None:
+        return
+    if is_device_cuda(device):
+        torch.cuda.current_stream().wait_stream(stream)
+
+def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False, stream=None):
     if device is None or weight.device == device:
         if not copy:
             if dtype is None or weight.dtype == dtype:
                 return weight
+        if stream is not None:
+            with stream:
+                return weight.to(dtype=dtype, copy=copy)
         return weight.to(dtype=dtype, copy=copy)
 
-    r = torch.empty_like(weight, dtype=dtype, device=device)
-    r.copy_(weight, non_blocking=non_blocking)
+    if stream is not None:
+        with stream:
+            r = torch.empty_like(weight, dtype=dtype, device=device)
+            r.copy_(weight, non_blocking=non_blocking)
+    else:
+        r = torch.empty_like(weight, dtype=dtype, device=device)
+        r.copy_(weight, non_blocking=non_blocking)
     return r
 
 def cast_to_device(tensor, device, dtype, copy=False):
