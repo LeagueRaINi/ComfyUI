@@ -41,6 +41,7 @@ import comfy.text_encoders.hunyuan_video
 import comfy.text_encoders.cosmos
 import comfy.text_encoders.lumina2
 import comfy.text_encoders.wan
+import comfy.text_encoders.hidream
 
 import comfy.model_patcher
 import comfy.lora
@@ -119,6 +120,7 @@ class CLIP:
         self.layer_idx = None
         self.use_clip_schedule = False
         logging.info("CLIP/text encoder model load device: {}, offload device: {}, current: {}, dtype: {}".format(load_device, offload_device, params['device'], dtype))
+        self.tokenizer_options = {}
 
     def clone(self):
         n = CLIP(no_init=True)
@@ -126,6 +128,7 @@ class CLIP:
         n.cond_stage_model = self.cond_stage_model
         n.tokenizer = self.tokenizer
         n.layer_idx = self.layer_idx
+        n.tokenizer_options = self.tokenizer_options.copy()
         n.use_clip_schedule = self.use_clip_schedule
         n.apply_hooks_to_conds = self.apply_hooks_to_conds
         return n
@@ -133,10 +136,18 @@ class CLIP:
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
         return self.patcher.add_patches(patches, strength_patch, strength_model)
 
+    def set_tokenizer_option(self, option_name, value):
+        self.tokenizer_options[option_name] = value
+
     def clip_layer(self, layer_idx):
         self.layer_idx = layer_idx
 
     def tokenize(self, text, return_word_ids=False, **kwargs):
+        tokenizer_options = kwargs.get("tokenizer_options", {})
+        if len(self.tokenizer_options) > 0:
+            tokenizer_options = {**self.tokenizer_options, **tokenizer_options}
+        if len(tokenizer_options) > 0:
+            kwargs["tokenizer_options"] = tokenizer_options
         return self.tokenizer.tokenize_with_weights(text, return_word_ids, **kwargs)
 
     def add_hooks_to_dict(self, pooled_dict: dict[str]):
@@ -702,6 +713,8 @@ class CLIPType(Enum):
     COSMOS = 11
     LUMINA2 = 12
     WAN = 13
+    HIDREAM = 14
+    CHROMA = 15
 
 
 def load_clip(ckpt_paths, embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION, model_options={}):
@@ -790,6 +803,9 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             elif clip_type == CLIPType.SD3:
                 clip_target.clip = comfy.text_encoders.sd3_clip.sd3_clip(clip_l=False, clip_g=True, t5=False)
                 clip_target.tokenizer = comfy.text_encoders.sd3_clip.SD3Tokenizer
+            elif clip_type == CLIPType.HIDREAM:
+                clip_target.clip = comfy.text_encoders.hidream.hidream_clip(clip_l=False, clip_g=True, t5=False, llama=False, dtype_t5=None, dtype_llama=None, t5xxl_scaled_fp8=None, llama_scaled_fp8=None)
+                clip_target.tokenizer = comfy.text_encoders.hidream.HiDreamTokenizer
             else:
                 clip_target.clip = sdxl_clip.SDXLRefinerClipModel
                 clip_target.tokenizer = sdxl_clip.SDXLTokenizer
@@ -803,13 +819,17 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             elif clip_type == CLIPType.LTXV:
                 clip_target.clip = comfy.text_encoders.lt.ltxv_te(**t5xxl_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.lt.LTXVT5Tokenizer
-            elif clip_type == CLIPType.PIXART:
+            elif clip_type == CLIPType.PIXART or clip_type == CLIPType.CHROMA:
                 clip_target.clip = comfy.text_encoders.pixart_t5.pixart_te(**t5xxl_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.pixart_t5.PixArtTokenizer
             elif clip_type == CLIPType.WAN:
                 clip_target.clip = comfy.text_encoders.wan.te(**t5xxl_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.wan.WanT5Tokenizer
                 tokenizer_data["spiece_model"] = clip_data[0].get("spiece_model", None)
+            elif clip_type == CLIPType.HIDREAM:
+                clip_target.clip = comfy.text_encoders.hidream.hidream_clip(**t5xxl_detect(clip_data),
+                                                                        clip_l=False, clip_g=False, t5=True, llama=False, dtype_llama=None, llama_scaled_fp8=None)
+                clip_target.tokenizer = comfy.text_encoders.hidream.HiDreamTokenizer
             else: #CLIPType.MOCHI
                 clip_target.clip = comfy.text_encoders.genmo.mochi_te(**t5xxl_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.genmo.MochiT5Tokenizer
@@ -826,10 +846,18 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             clip_target.clip = comfy.text_encoders.lumina2.te(**llama_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.lumina2.LuminaTokenizer
             tokenizer_data["spiece_model"] = clip_data[0].get("spiece_model", None)
+        elif te_model == TEModel.LLAMA3_8:
+            clip_target.clip = comfy.text_encoders.hidream.hidream_clip(**llama_detect(clip_data),
+                                                                        clip_l=False, clip_g=False, t5=False, llama=True, dtype_t5=None, t5xxl_scaled_fp8=None)
+            clip_target.tokenizer = comfy.text_encoders.hidream.HiDreamTokenizer
         else:
+            # clip_l
             if clip_type == CLIPType.SD3:
                 clip_target.clip = comfy.text_encoders.sd3_clip.sd3_clip(clip_l=True, clip_g=False, t5=False)
                 clip_target.tokenizer = comfy.text_encoders.sd3_clip.SD3Tokenizer
+            elif clip_type == CLIPType.HIDREAM:
+                clip_target.clip = comfy.text_encoders.hidream.hidream_clip(clip_l=True, clip_g=False, t5=False, llama=False, dtype_t5=None, dtype_llama=None, t5xxl_scaled_fp8=None, llama_scaled_fp8=None)
+                clip_target.tokenizer = comfy.text_encoders.hidream.HiDreamTokenizer
             else:
                 clip_target.clip = sd1_clip.SD1ClipModel
                 clip_target.tokenizer = sd1_clip.SD1Tokenizer
@@ -847,12 +875,33 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
         elif clip_type == CLIPType.HUNYUAN_VIDEO:
             clip_target.clip = comfy.text_encoders.hunyuan_video.hunyuan_video_clip(**llama_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.hunyuan_video.HunyuanVideoTokenizer
+        elif clip_type == CLIPType.HIDREAM:
+            # Detect
+            hidream_dualclip_classes = []
+            for hidream_te in clip_data:
+                te_model = detect_te_model(hidream_te)
+                hidream_dualclip_classes.append(te_model)
+
+            clip_l = TEModel.CLIP_L in hidream_dualclip_classes
+            clip_g = TEModel.CLIP_G in hidream_dualclip_classes
+            t5 = TEModel.T5_XXL in hidream_dualclip_classes
+            llama = TEModel.LLAMA3_8 in hidream_dualclip_classes
+
+            # Initialize t5xxl_detect and llama_detect kwargs if needed
+            t5_kwargs = t5xxl_detect(clip_data) if t5 else {}
+            llama_kwargs = llama_detect(clip_data) if llama else {}
+
+            clip_target.clip = comfy.text_encoders.hidream.hidream_clip(clip_l=clip_l, clip_g=clip_g, t5=t5, llama=llama, **t5_kwargs, **llama_kwargs)
+            clip_target.tokenizer = comfy.text_encoders.hidream.HiDreamTokenizer
         else:
             clip_target.clip = sdxl_clip.SDXLClipModel
             clip_target.tokenizer = sdxl_clip.SDXLTokenizer
     elif len(clip_data) == 3:
         clip_target.clip = comfy.text_encoders.sd3_clip.sd3_clip(**t5xxl_detect(clip_data))
         clip_target.tokenizer = comfy.text_encoders.sd3_clip.SD3Tokenizer
+    elif len(clip_data) == 4:
+        clip_target.clip = comfy.text_encoders.hidream.hidream_clip(**t5xxl_detect(clip_data), **llama_detect(clip_data))
+        clip_target.tokenizer = comfy.text_encoders.hidream.HiDreamTokenizer
 
     parameters = 0
     for c in clip_data:
