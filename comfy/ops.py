@@ -308,10 +308,10 @@ def fp8_linear(self, input):
         if scale_input is None:
             scale_input = torch.ones((), device=input.device, dtype=torch.float32)
             input = torch.clamp(input, min=-448, max=448, out=input)
-            input = input.reshape(-1, input_shape[2]).to(dtype)
+            input = input.reshape(-1, input_shape[2]).to(dtype).contiguous()
         else:
             scale_input = scale_input.to(input.device)
-            input = (input * (1.0 / scale_input).to(input_dtype)).reshape(-1, input_shape[2]).to(dtype)
+            input = (input * (1.0 / scale_input).to(input_dtype)).reshape(-1, input_shape[2]).to(dtype).contiguous()
 
         if bias is not None:
             o = torch._scaled_mm(input, w, out_dtype=input_dtype, bias=bias, scale_a=scale_input, scale_b=scale_weight)
@@ -336,9 +336,12 @@ class fp8_ops(manual_cast):
             return None
 
         def forward_comfy_cast_weights(self, input):
-            out = fp8_linear(self, input)
-            if out is not None:
-                return out
+            try:
+                out = fp8_linear(self, input)
+                if out is not None:
+                    return out
+            except Exception as e:
+                logging.info("Exception during fp8 op: {}".format(e))
 
             weight, bias = cast_bias_weight(self, input)
             return torch.nn.functional.linear(input, weight, bias)

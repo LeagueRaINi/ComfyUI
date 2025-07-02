@@ -256,7 +256,13 @@ def _calc_cond_batch(model: 'BaseModel', conds: list[list[dict]], x_in: torch.Te
             for i in range(1, len(to_batch_temp) + 1):
                 batch_amount = to_batch_temp[:len(to_batch_temp)//i]
                 input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
-                if model.memory_required(input_shape) * 1.5 < free_memory:
+                cond_shapes = collections.defaultdict(list)
+                for tt in batch_amount:
+                    cond = {k: v.size() for k, v in to_run[tt][0].conditioning.items()}
+                    for k, v in to_run[tt][0].conditioning.items():
+                        cond_shapes[k].append(v.size())
+
+                if model.memory_required(input_shape, cond_shapes=cond_shapes) * 1.5 < free_memory:
                     to_batch = batch_amount
                     break
 
@@ -1033,13 +1039,13 @@ class SchedulerHandler(NamedTuple):
     use_ms: bool = True
 
 SCHEDULER_HANDLERS = {
-    "normal": SchedulerHandler(normal_scheduler),
+    "simple": SchedulerHandler(simple_scheduler),
+    "sgm_uniform": SchedulerHandler(partial(normal_scheduler, sgm=True)),
     "karras": SchedulerHandler(k_diffusion_sampling.get_sigmas_karras, use_ms=False),
     "exponential": SchedulerHandler(k_diffusion_sampling.get_sigmas_exponential, use_ms=False),
-    "sgm_uniform": SchedulerHandler(partial(normal_scheduler, sgm=True)),
-    "simple": SchedulerHandler(simple_scheduler),
     "ddim_uniform": SchedulerHandler(ddim_scheduler),
     "beta": SchedulerHandler(beta_scheduler),
+    "normal": SchedulerHandler(normal_scheduler),
     "linear_quadratic": SchedulerHandler(linear_quadratic_schedule),
     "kl_optimal": SchedulerHandler(kl_optimal_scheduler, use_ms=False),
 }
