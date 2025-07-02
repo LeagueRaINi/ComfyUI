@@ -2078,6 +2078,38 @@ EXTENSION_WEB_DIRS = {}
 # Dictionary of successfully loaded module names and associated directories.
 LOADED_MODULE_DIRS = {}
 
+# Dictionary of successfully loaded module names and associated directories.
+LOADED_MODULE_DIRS = {}
+
+def zluda_cudnn_patch(module_name):
+    return f"""import torch
+import logging
+from types import ModuleType
+
+class CustomCudnnModule(ModuleType):
+    def __init__(self, original_module):
+        super().__init__(original_module.__name__)
+        self.__dict__.update(original_module.__dict__)
+
+    @property
+    def enabled(self):
+        return False
+
+    @enabled.setter
+    def enabled(self, value):
+        # Prevent extensions from enabling cuDNN
+        if value:
+            logging.info("\033[36m[ZLUDA] Blocked attempt to enable cuDNN from custom node: {{}}.\033[0m".format(r"{module_name}"))
+
+try:
+    if "[ZLUDA]" in torch.cuda.get_device_name(torch.cuda.current_device()):
+        original_cudnn = torch.backends.cudnn
+        custom_cudnn = CustomCudnnModule(original_cudnn)
+        torch.backends.cudnn = custom_cudnn
+        logging.info("\033[32m[ZLUDA] Patched torch.backends.cudnn in custom node {{}} to prevent enabling cuDNN.\033[0m".format(r"{module_name}"))
+except Exception as e:
+    logging.error("\033[31m[ZLUDA] Error patching cuDNN in custom node {{}}: {{}}.\033[0m".format(r"{module_name}", e))
+    pass"""
 
 def get_module_name(module_path: str) -> str:
     """
@@ -2125,6 +2157,10 @@ def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes
 
         LOADED_MODULE_DIRS[module_name] = os.path.abspath(module_dir)
 
+        # we inject this patch into every module to prevent them from possibly re'enabling cuDNN,
+        # its dirty, it sucks but it works
+        exec(zluda_cudnn_patch(module_name), module.__dict__)
+      
         try:
             from comfy_config import config_parser
 
